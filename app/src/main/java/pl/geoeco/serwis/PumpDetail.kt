@@ -1,0 +1,1549 @@
+package pl.geoeco.serwis
+
+import android.annotation.SuppressLint
+import android.os.Handler
+import android.os.Looper
+import android.view.View
+import android.view.ViewGroup
+import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.border
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Report
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material.icons.outlined.Thermostat
+import androidx.compose.material.icons.outlined.WaterDrop
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import android.content.Intent
+import androidx.core.content.FileProvider
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+private const val DETAIL_PORTAL_URL = "https://service.iglutech.eu"
+
+/** Opis jednego parametru z config/render. */
+private class Param(
+    val keyword: String,
+    val valueType: String,
+    val inputType: String,
+    val scale: Double,
+    val units: String,
+    val access: String,
+    val group: String,
+    val groupOrder: Int,
+    val order: Int,
+    /** Dla pól typu lista: wartość -> opis (np. "true" -> "Curve2"). */
+    val range: Map<String, String>,
+    /** Cały opis parametru z API (tekst JSON), do dopasowania po etykiecie, np. "Reset alarms". */
+    val raw: String = ""
+)
+
+private class Detail(
+    val title: String,
+    val sw: String,
+    val sbc: String,
+    val connection: String,
+    val alarm: Boolean,
+    val warning: Boolean,
+    val params: List<Param>,
+    val current: Map<String, Any?>,
+    val desired: Map<String, Any?>,
+    /** Wszystkie pola z odpowiedzi heatPumps/{id} (spłaszczone), do okna z danymi użytkownika. */
+    val info: List<Pair<String, String>> = emptyList(),
+    /** Nazwa alarmu -> opis z tłumaczeń portalu (np. FloorTError -> "Floor temperature sensor error"). */
+    val alarmTexts: Map<String, String> = emptyMap()
+)
+
+private fun JSONObject.s(k: String): String = if (isNull(k)) "" else optString(k)
+
+private fun toMap(o: JSONObject?): Map<String, Any?> {
+    val m = LinkedHashMap<String, Any?>()
+    if (o == null) return m
+    val it = o.keys()
+    while (it.hasNext()) {
+        val k = it.next()
+        m[k] = if (o.isNull(k)) null else o.get(k)
+    }
+    return m
+}
+
+/** Pobiera szczegóły, stan i opis parametrów (trzy żądania do API). Wołać poza wątkiem interfejsu. */
+private fun loadDetail(p: Pump, token: String): Detail {
+    val hp = IgluApi.heatPump(p.id, token)
+    val st = IgluApi.state(p.id, token)
+    val cfg = IgluApi.config(p.serial, token)
+
+    val params = ArrayList<Param>()
+    for (i in 0 until cfg.length()) {
+        val o = cfg.getJSONObject(i)
+        val g = o.optJSONObject("group")
+        val range = LinkedHashMap<String, String>()
+        val ra = o.optJSONArray("rangeValues")
+        if (ra != null) {
+            for (j in 0 until ra.length()) {
+                val r = ra.getJSONObject(j)
+                range[r.s("value")] = r.s("displayValue")
+            }
+        }
+        params.add(
+            Param(
+                keyword = o.s("keyword"),
+                valueType = o.s("valueType"),
+                inputType = o.s("inputType"),
+                scale = o.optDouble("scale", 1.0),
+                units = o.s("units"),
+                access = o.s("access"),
+                group = g?.s("name") ?: "Inne",
+                groupOrder = g?.optInt("sortOrder", 999) ?: 999,
+                order = o.optInt("sortOrder"),
+                range = range,
+                raw = o.toString()
+            )
+        )
+    }
+
+    val sd = hp.optJSONObject("systemData")
+    val custom = hp.s("customName")
+    return Detail(
+        title = if (custom.isBlank()) p.serial else custom,
+        sw = sd?.s("swVersion").orEmpty(),
+        sbc = sd?.s("sbcVersion").orEmpty(),
+        connection = sd?.s("connectionType").orEmpty(),
+        alarm = sd?.optBoolean("alarm") ?: false,
+        warning = sd?.optBoolean("warning") ?: false,
+        params = params,
+        current = toMap(st.optJSONObject("currentState")),
+        desired = toMap(st.optJSONObject("desiredState")),
+        info = flattenInfo(hp),
+        alarmTexts = IgluApi.alarmTexts(token)
+    )
+}
+
+/** Liczba miejsc po przecinku wynika z kroku pola (scale): 0.1 -> 1, 0.01 -> 2 itd. */
+private fun decimals(scale: Double): Int = when {
+    scale <= 0.0001 -> 4
+    scale <= 0.001 -> 3
+    scale <= 0.01 -> 2
+    scale <= 0.1 -> 1
+    else -> 0
+}
+
+/** Wartość do wyświetlenia w polu (bez jednostki): opis z listy, Tak/Nie dla logicznych, liczba jak na portalu. */
+private fun valueText(v: Any?, p: Param): String {
+    if (v == null) return "—"
+    val raw = v.toString()
+    p.range[raw]?.trim()?.let { return it }
+    if (v is Boolean) return if (v) "☑ Tak" else "☐ Nie"
+    if (p.valueType == "decimal" && v is Number) {
+        return String.format(Locale.US, "%.${decimals(p.scale)}f", v.toDouble())
+    }
+    return raw
+}
+
+/** Jedna ramka ze strumienia: czas odbioru i wartości liczbowe (logiczne jako 1/0). */
+private class LiveFrame(val t: Long, val values: Map<String, Double>)
+
+/** Ile historii trzymamy w pamięci dla wykresów trybu Live. */
+private const val LIVE_WINDOW_MS = 10 * 60 * 1000L
+
+/** Co ile ms w trybie Live prosimy pompę o świeżą ramkę (portal robi to co 1 s, my rzadziej, żeby nie męczyć serwera). */
+private const val LIVE_POLL_MS = 5_000L
+
+private fun appendFrame(old: List<LiveFrame>, p: Map<String, Any?>): List<LiveFrame> {
+    val now = System.currentTimeMillis()
+    val vals = LinkedHashMap<String, Double>()
+    for ((k, v) in p) {
+        when (v) {
+            is Boolean -> vals[k] = if (v) 1.0 else 0.0
+            is Number -> vals[k] = v.toDouble()
+            else -> {}
+        }
+    }
+    if (vals.isEmpty()) return old
+    return (old + LiveFrame(now, vals)).filter { it.t >= now - LIVE_WINDOW_MS }
+}
+
+private fun clockText(t: Long): String = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(t))
+
+/** Wartość z wykresu w postaci zrozumiałej dla valueText (Boolean, Long albo Double). */
+private fun chartValue(v: Double, p: Param): Any = when {
+    p.valueType == "boolean" -> v > 0.5
+    p.valueType != "decimal" && v == Math.floor(v) && Math.abs(v) < 1e12 -> v.toLong()
+    else -> v
+}
+
+/** Zapisuje ramki jako CSV (średnik, przecinek dziesiętny: otwiera się w Excelu) i otwiera okno udostępniania. */
+private fun exportCsv(ctx: android.content.Context, serial: String, frames: List<LiveFrame>, keys: List<String>) {
+    val sb = StringBuilder()
+    sb.append("czas;").append(keys.joinToString(";")).append("\n")
+    val fmt = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
+    for (f in frames) {
+        sb.append(fmt.format(Date(f.t)))
+        for (k in keys) {
+            sb.append(';')
+            f.values[k]?.let { sb.append(it.toString().replace('.', ',')) }
+        }
+        sb.append("\n")
+    }
+    val dir = File(ctx.cacheDir, "pdf").apply { mkdirs() }
+    val file = File(dir, "Live_${serial}.csv")
+    file.writeText("\uFEFF" + sb.toString(), Charsets.UTF_8)
+    val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", file)
+    val i = Intent(Intent.ACTION_SEND).apply {
+        type = "text/csv"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    ctx.startActivity(Intent.createChooser(i, "Eksport CSV").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+}
+
+/**
+ * Niewidoczny WebView, który ładuje portal tylko po to, żeby sesja (ciasteczka) odnowiła token
+ * w pamięci strony; potem odczytuje go do IgluToken. Kończy po zdobyciu tokenu albo po 30 s.
+ */
+@SuppressLint("SetJavaScriptEnabled")
+@Composable
+private fun TokenFetchView(onDone: () -> Unit) {
+    var web by remember { mutableStateOf<WebView?>(null) }
+
+    AndroidView(
+        modifier = Modifier.fillMaxSize(),
+        factory = { c ->
+            WebView(c).apply {
+                layoutParams = ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+                settings.javaScriptEnabled = true
+                settings.domStorageEnabled = true
+                settings.allowFileAccess = false
+                settings.allowContentAccess = false
+                CookieManager.getInstance().setAcceptCookie(true)
+                setBackgroundColor(0xFF070B14.toInt())
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+                setOnTouchListener { _, _ -> true }
+                webViewClient = WebViewClient()
+                web = this
+                loadUrl(DETAIL_PORTAL_URL)
+            }
+        },
+        onRelease = { it.destroy() }
+    )
+
+    LaunchedEffect(web) {
+        val w = web ?: return@LaunchedEffect
+        val start = System.currentTimeMillis()
+        while (System.currentTimeMillis() - start < 30_000 && !IgluToken.valid()) {
+            delay(1500)
+            try {
+                val raw = w.evalJs(TOKEN_JS)
+                if (!raw.isNullOrBlank()) {
+                    val t = JSONObject(raw).optString("t")
+                    if (t.isNotBlank()) IgluToken.set(t)
+                }
+            } catch (e: Exception) {
+            }
+        }
+        onDone()
+    }
+}
+
+/** Ostatnia surowa ramka strumienia bez pola "parameters" (i inne komunikaty hubu). */
+internal object LiveMeta {
+    @Volatile var text: String = ""
+
+    /** Aktywne alarmy/ostrzeżenia z ramki: pole "alarms" = [{"name":"FloorTError","isAlarm":false}], isAlarm=false oznacza ostrzeżenie. */
+    @Volatile var alarms: List<Pair<String, Boolean>> = emptyList()
+
+    /** Błędy modułu komunikacyjnego z pola system.SBCError. */
+    @Volatile var sbcErrors: List<String> = emptyList()
+
+    fun parse(json: String) {
+        try {
+            val o = JSONObject(json)
+            val a = o.optJSONArray("alarms")
+            if (a != null) {
+                alarms = (0 until a.length()).mapNotNull { i ->
+                    val e = a.optJSONObject(i) ?: return@mapNotNull null
+                    val n = e.optString("name")
+                    if (n.isBlank()) null else n to e.optBoolean("isAlarm")
+                }
+            }
+            val se = o.optJSONObject("system")?.optJSONArray("SBCError")
+            if (se != null) sbcErrors = (0 until se.length()).map { se.opt(it)?.toString().orEmpty() }.filter { it.isNotBlank() }
+        } catch (e: Exception) {
+        }
+    }
+}
+
+/** Most JS -> Kotlin dla strumienia na żywo (wywołania z wątku WebView przekazujemy na wątek główny). */
+private class LiveBridge(
+    private val onParams: (String) -> Unit,
+    private val onStatus: (String) -> Unit
+) {
+    private val main = Handler(Looper.getMainLooper())
+
+    @JavascriptInterface
+    fun data(json: String) { main.post { onParams(json) } }
+
+    @JavascriptInterface
+    fun status(s: String) { main.post { onStatus(s) } }
+
+    @JavascriptInterface
+    fun meta(s: String) { LiveMeta.text = s.take(4000); LiveMeta.parse(s) }
+}
+
+/**
+ * Strumień na żywo (SignalR, protokół JSON) z https://signalr.iglutech.eu/hubs/devicePayload-stream.
+ * Tak samo robi portal: handshake {"protocol":"json","version":1}, potem wywołanie
+ * SubscribeToServiceDeviceStream z numerem seryjnym; w odpowiedzi przychodzą ServiceStreamData z pełnym
+ * zestawem parametrów (także odczyty analogowe: temperatury, ciśnienia, wyjścia, liczniki), mniej więcej co 25 s.
+ * Połączenie robi ukryty WebView z adresem bazowym portalu (żeby origin się zgadzał), bez dodatkowych bibliotek.
+ */
+@SuppressLint("SetJavaScriptEnabled")
+@Composable
+private fun LiveStreamView(
+    serial: String,
+    token: String,
+    onParams: (Map<String, Any?>) -> Unit,
+    onStatus: (String) -> Unit
+) {
+    val html = """
+<html><body><script>
+(function(){
+  var RS=String.fromCharCode(30);
+  var TOKEN=${JSONObject.quote(token)};
+  var SERIAL=${JSONObject.quote(serial)};
+  var ws=null, timer=null;
+  function send(o){ try{ ws.send(JSON.stringify(o)+RS); }catch(e){} }
+  function connect(){
+    Android.status('łączenie…');
+    try{
+      ws=new WebSocket('wss://signalr.iglutech.eu/hubs/devicePayload-stream?access_token='+encodeURIComponent(TOKEN));
+    }catch(e){ Android.status('błąd: '+e); return; }
+    ws.onopen=function(){ ws.send(JSON.stringify({protocol:'json',version:1})+RS); };
+    ws.onmessage=function(ev){
+      String(ev.data).split(RS).forEach(function(part){
+        if(!part) return;
+        var o; try{ o=JSON.parse(part); }catch(e){ return; }
+        if(o.type===undefined){
+          if(o.error){ Android.status('błąd: '+o.error); return; }
+          send({type:6});
+          send({arguments:[SERIAL],target:'SubscribeToServiceDeviceStream',type:1});
+        } else if(o.type===1 && o.target==='OnSubscribeSuccess'){
+          Android.status('połączono');
+        } else if(o.type===1 && o.target==='ServiceStreamData'){
+          var a=(o.arguments||[])[0];
+          if(a){ var rest={}; for(var k in a){ if(k!=='parameters') rest[k]=a[k]; } Android.meta(JSON.stringify(rest)); }
+          if(a && a.parameters){ Android.data(JSON.stringify(a.parameters)); Android.status('połączono'); }
+        } else if(o.type===1 && o.target!=='OnSubscribeSuccess'){
+          Android.meta('target '+o.target+': '+JSON.stringify(o.arguments));
+        } else if(o.type===6){
+          send({type:6});
+        } else if(o.type===7){
+          Android.status('rozłączono przez serwer');
+        }
+      });
+    };
+    ws.onclose=function(){
+      Android.status('rozłączono (ponawiam)');
+      clearTimeout(timer); timer=setTimeout(connect,5000);
+    };
+    ws.onerror=function(){};
+  }
+  connect();
+  setInterval(function(){ if(ws && ws.readyState===1) send({type:6}); },15000);
+})();
+</script></body></html>
+"""
+    AndroidView(
+        modifier = Modifier.fillMaxSize(),
+        factory = { c ->
+            WebView(c).apply {
+                layoutParams = ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+                settings.javaScriptEnabled = true
+                settings.allowFileAccess = false
+                settings.allowContentAccess = false
+                setBackgroundColor(0xFF070B14.toInt())
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+                setOnTouchListener { _, _ -> true }
+                addJavascriptInterface(
+                    LiveBridge(
+                        onParams = { json ->
+                            try { onParams(toMap(JSONObject(json))) } catch (e: Exception) { }
+                        },
+                        onStatus = onStatus
+                    ),
+                    "Android"
+                )
+                webViewClient = WebViewClient()
+                loadDataWithBaseURL(DETAIL_PORTAL_URL, html, "text/html", "utf-8", null)
+            }
+        },
+        onRelease = { it.destroy() }
+    )
+}
+
+/**
+ * Ekran szczegółów pompy: stan, wersje oprogramowania i wszystkie parametry (tylko odczyt),
+ * pogrupowane tak jak w portalu. Parametry bez wartości w stanie pompy są pomijane.
+ */
+@Composable
+fun PumpDetailScreen(pump: Pump, onBack: () -> Unit, onOpenPortal: () -> Unit) {
+    val ctxForFlags = LocalContext.current
+    var tokenOk by remember { mutableStateOf(IgluToken.valid()) }
+    var tokenFailed by remember { mutableStateOf(false) }
+    var detail by remember { mutableStateOf<Detail?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var loading by remember { mutableStateOf(true) }
+    var reload by remember { mutableStateOf(0) }
+    var query by remember { mutableStateOf("") }
+    // Edycja jest domyślnie wyłączona i znika po wyjściu z ekranu.
+    var editMode by remember(pump.serial) { mutableStateOf(false) }
+    var confirmEdit by remember { mutableStateOf(false) }
+    var editing by remember { mutableStateOf<Param?>(null) }
+    var saveMsg by remember { mutableStateOf<String?>(null) }
+    // Odczyty na żywo ze strumienia SignalR (nakładają się na stan z API) i stan połączenia.
+    var live by remember { mutableStateOf<Map<String, Any?>>(emptyMap()) }
+    var liveStatus by remember { mutableStateOf("") }
+    // Tryb Live: strumień łączy się tylko wtedy, edycja jest zablokowana, a odczyty rysują wykresy.
+    var liveMode by remember(pump.serial) { mutableStateOf(false) }
+    var paused by remember(pump.serial) { mutableStateOf(false) }
+    var frames by remember(pump.serial) { mutableStateOf<List<LiveFrame>>(emptyList()) }
+    var chartSel by remember(pump.serial) { mutableStateOf<Set<String>>(emptySet()) }
+    val pausedNow by rememberUpdatedState(paused)
+    val liveNow by rememberUpdatedState(liveMode)
+    // Jednorazowy odczyt ze strumienia przy otwarciu i po "Odśwież": analogi nie są w stanie z API.
+    var snapshot by remember(pump.serial) { mutableStateOf(true) }
+    val effective: Map<String, Any?> = remember(detail, live) { (detail?.current ?: emptyMap()) + live }
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(reload, tokenOk) {
+        snapshot = true
+        delay(30_000)
+        snapshot = false
+    }
+
+    // Analogów nie ma w /state: przychodzą tylko ramką ze strumienia, a ta przychodzi po GET devices/{id}/request.
+    // Przy jednorazowym odczycie prosimy raz (z ponowieniem co 6 s do skutku), w trybie Live co LIVE_POLL_MS.
+    val streaming = (liveMode || snapshot) && tokenOk && pump.id > 0L
+    LaunchedEffect(streaming, liveMode, paused) {
+        if (!streaming || (liveMode && paused)) return@LaunchedEffect
+        delay(1500)
+        while (true) {
+            val token = IgluToken.token ?: break
+            try {
+                withContext(Dispatchers.IO) { IgluApi.requestData(pump.id, token) }
+            } catch (e: Exception) {
+                if (e.message?.contains("401") == true) break
+            }
+            delay(if (liveMode) LIVE_POLL_MS else 6_000L)
+        }
+    }
+
+    LaunchedEffect(tokenOk, reload) {
+        if (!tokenOk || pump.id <= 0L) return@LaunchedEffect
+        val token = IgluToken.token ?: return@LaunchedEffect
+        loading = true
+        error = null
+        try {
+            detail = withContext(Dispatchers.IO) { loadDetail(pump, token) }
+            detail?.let { PumpStore.setFlags(ctxForFlags, pump.serial, it.alarm, it.warning) }
+        } catch (e: Exception) {
+            error = e.message ?: "Nieznany błąd"
+            if (e.message?.contains("401") == true) {
+                // Token odrzucony: następna próba pobierze nowy z sesji portalu.
+                IgluToken.clear()
+                tokenOk = false
+                tokenFailed = true
+            }
+        } finally {
+            loading = false
+        }
+    }
+
+    Box(Modifier.fillMaxSize()) {
+        if (!tokenOk && !tokenFailed && pump.id > 0L) {
+            TokenFetchView(onDone = {
+                tokenOk = IgluToken.valid()
+                if (!tokenOk) tokenFailed = true
+            })
+        }
+
+        val streamToken = IgluToken.token
+        if ((liveMode || snapshot) && tokenOk && streamToken != null && pump.id > 0L) {
+            // Klucz = token: po odnowieniu tokenu strumień łączy się od nowa.
+            key(streamToken) {
+                LiveStreamView(
+                    serial = pump.serial,
+                    token = streamToken,
+                    onParams = {
+                        if (!pausedNow) {
+                            live = live + it
+                            if (liveNow) frames = appendFrame(frames, it)
+                        }
+                        snapshot = false
+                    },
+                    onStatus = { liveStatus = it }
+                )
+            }
+        }
+
+        AppScaffold(pump.serial, onBack, onRefresh = { reload++ }, refreshing = loading) { pad ->
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .padding(pad)
+                    .padding(horizontal = 16.dp)
+            ) {
+                val d = detail
+                when {
+                    pump.id <= 0L -> {
+                        Text(
+                            "Brak identyfikatora tej pompy. Wróć do listy i poczekaj, aż odświeży się z API.",
+                            modifier = Modifier.padding(top = 12.dp)
+                        )
+                        Button(onClick = onOpenPortal, modifier = Modifier.padding(top = 12.dp)) {
+                            Text("Otwórz w portalu")
+                        }
+                    }
+                    tokenFailed -> {
+                        Text(
+                            (error ?: "Nie udało się pobrać tokenu z sesji portalu.") +
+                                " Otwórz portal Iglutech i zaloguj się, potem spróbuj ponownie.",
+                            modifier = Modifier.padding(top = 12.dp)
+                        )
+                        Row(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = {
+                                error = null
+                                tokenFailed = false
+                                tokenOk = IgluToken.valid()
+                                reload++
+                            }) { Text("Spróbuj ponownie") }
+                            TextButton(onClick = onOpenPortal) { Text("Otwórz w portalu") }
+                        }
+                    }
+                    d == null && (loading || !tokenOk) -> {
+                        Row(
+                            Modifier.padding(top = 16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            CircularProgressIndicator()
+                            Text("Pobieranie danych pompy…")
+                        }
+                    }
+                    d == null -> {
+                        Text(error ?: "Brak danych.", modifier = Modifier.padding(top = 12.dp))
+                        Button(onClick = { reload++ }, modifier = Modifier.padding(top = 12.dp)) { Text("Spróbuj ponownie") }
+                    }
+                    else -> DetailBody(
+                        pump = pump,
+                        d = d,
+                        loading = loading,
+                        error = error,
+                        query = query,
+                        onQuery = { query = it },
+                        onRefresh = { reload++ },
+                        onOpenPortal = onOpenPortal,
+                        editMode = editMode,
+                        onToggleEdit = { if (editMode) editMode = false else confirmEdit = true },
+                        onEdit = { editing = it },
+                        onReset = { rp ->
+                            val token = IgluToken.token
+                            if (token == null) {
+                                saveMsg = "Brak tokenu, odśwież ekran i spróbuj ponownie."
+                            } else {
+                                scope.launch {
+                                    saveMsg = "Resetowanie błędu…"
+                                    try {
+                                        val v: Any = if (rp.valueType == "boolean") true else 1L
+                                        withContext(Dispatchers.IO) { IgluApi.setParam(pump.id, rp.keyword, v, token) }
+                                        saveMsg = "Wysłano reset (${rp.keyword}). Stan pompy odświeży się za chwilę."
+                                        delay(3000)
+                                        reload++
+                                    } catch (e: Exception) {
+                                        saveMsg = "Błąd resetu: ${e.message}"
+                                    }
+                                }
+                            }
+                        },
+                        saveMsg = saveMsg,
+                        current = effective,
+                        liveStatus = liveStatus.ifBlank { "—" } + " · odebrane: ${live.size} param.",
+                        liveMode = liveMode,
+                        onToggleLive = {
+                            liveMode = !liveMode
+                            if (liveMode) editMode = false else liveStatus = ""
+                            paused = false
+                        },
+                        paused = paused,
+                        onTogglePause = { paused = !paused },
+                        frames = frames,
+                        chartSel = chartSel,
+                        onChartSel = { k, on -> chartSel = if (on) chartSel + k else chartSel - k }
+                    )
+                }
+            }
+        }
+    }
+
+    if (confirmEdit) {
+        AlertDialog(
+            onDismissRequest = { confirmEdit = false },
+            title = { Text("Włączyć edycję parametrów?") },
+            text = {
+                Text(
+                    "Zmiany są wysyłane do prawdziwej pompy (${pump.serial}). Każdą zmianę potwierdzisz osobno. " +
+                        "Aplikacja nie zna limitów wartości, pilnuje ich tylko serwer Iglutech."
+                )
+            },
+            confirmButton = { TextButton(onClick = { editMode = true; confirmEdit = false }) { Text("Włącz") } },
+            dismissButton = { TextButton(onClick = { confirmEdit = false }) { Text("Anuluj") } }
+        )
+    }
+
+    val ep = editing
+    val dnow = detail
+    if (ep != null && dnow != null) {
+        EditDialog(
+            p = ep,
+            current = effective[ep.keyword],
+            onDismiss = { editing = null },
+            onSave = { value ->
+                editing = null
+                val token = IgluToken.token
+                if (token == null) {
+                    saveMsg = "Brak tokenu, odśwież ekran i spróbuj ponownie."
+                } else {
+                    scope.launch {
+                        saveMsg = "Wysyłanie…"
+                        try {
+                            withContext(Dispatchers.IO) { IgluApi.setParam(pump.id, ep.keyword, value, token) }
+                            saveMsg = "Wysłano: ${ep.keyword} = $value. Pompa zastosuje zmianę po chwili (zobacz „zadane”)."
+                            reload++
+                        } catch (e: Exception) {
+                            saveMsg = "Błąd zapisu: ${e.message}"
+                        }
+                    }
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun DetailBody(
+    pump: Pump,
+    d: Detail,
+    loading: Boolean,
+    error: String?,
+    query: String,
+    onQuery: (String) -> Unit,
+    onRefresh: () -> Unit,
+    onOpenPortal: () -> Unit,
+    editMode: Boolean,
+    onToggleEdit: () -> Unit,
+    onEdit: (Param) -> Unit,
+    onReset: (Param) -> Unit,
+    saveMsg: String?,
+    current: Map<String, Any?>,
+    liveStatus: String,
+    liveMode: Boolean,
+    onToggleLive: () -> Unit,
+    paused: Boolean,
+    onTogglePause: () -> Unit,
+    frames: List<LiveFrame>,
+    chartSel: Set<String>,
+    onChartSel: (String, Boolean) -> Unit
+) {
+    val ctx = LocalContext.current
+    val q = query.trim().lowercase()
+    val groups = remember(d, current.size) {
+        d.params
+            .filter { current.containsKey(it.keyword) || it.group.contains("analog", ignoreCase = true) }
+            .groupBy { it.group }
+            .entries
+            .sortedBy { e -> e.value.first().groupOrder }
+            .map { e -> e.key to e.value.sortedBy { it.order } }
+    }
+    var selected by remember(pump.serial) { mutableStateOf<String?>(null) }
+    val active = groups.firstOrNull { it.first == selected }?.first
+        ?: groups.firstOrNull { it.first == "UserSettings" }?.first
+        ?: groups.firstOrNull()?.first
+    val shown: List<Param> =
+        if (q.isNotEmpty()) groups.flatMap { it.second }.filter { it.keyword.lowercase().contains(q) }
+        else groups.firstOrNull { it.first == active }?.second.orEmpty()
+
+    LazyColumn(Modifier.fillMaxSize()) {
+        item { PumpSummaryCard(pump, d, current) }
+        if (d.alarm || d.warning) item { FaultCard(d, current, saveMsg, onReset) }
+        item {
+            AppCard(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp)
+            ) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            Modifier
+                                .size(10.dp)
+                                .clip(CircleShape)
+                                .background(if (pump.online) OnlineGreen else MaterialTheme.colorScheme.outline)
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(pump.serial, fontWeight = FontWeight.Bold, fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurface)
+                            SubText(pump.model)
+                        }
+                        StatusPill(pump.status, pump.online)
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        InfoChip("Alarmy: ${if (d.alarm) "TAK" else "nie"}", bad = d.alarm)
+                        InfoChip("Ostrzeżenia: ${if (d.warning) "TAK" else "nie"}", bad = d.warning)
+                    }
+                    SubText(
+                        "Oprogramowanie: ${d.sw.ifBlank { "—" }} · SBC: ${d.sbc.ifBlank { "—" }}" +
+                            if (d.connection.isNotBlank()) " · ${d.connection}" else ""
+                    )
+                    if (error != null) {
+                        Text("Błąd odświeżania: $error", fontSize = 13.sp, color = MaterialTheme.colorScheme.error)
+                    }
+                    if (saveMsg != null) {
+                        Text(saveMsg, fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+                    }
+                    SubText(
+                        "Na żywo: ${liveStatus.ifBlank { "—" }}" +
+                            if (liveMode) " · ramek: ${frames.size}" +
+                                (frames.lastOrNull()?.let { " · ostatnia: ${clockText(it.t)}" } ?: "") else ""
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                            Switch(checked = liveMode, onCheckedChange = { onToggleLive() })
+                            Text("  Live", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface)
+                        }
+                        Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                            Switch(checked = editMode, enabled = !liveMode, onCheckedChange = { onToggleEdit() })
+                            Text("  Edycja", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface)
+                        }
+                    }
+                    if (liveMode) SubText("Tryb Live włączony: edycja zablokowana.")
+                    else if (editMode) SubText("Edycja włączona: dotknij pola z ✎.")
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Button(enabled = !loading, onClick = onRefresh) { Text(if (loading) "Odświeżanie…" else "Odśwież") }
+                        TextButton(onClick = onOpenPortal) { Text("Otwórz w portalu") }
+                    }
+                }
+            }
+        }
+        item {
+            SearchField(
+                value = query,
+                onChange = onQuery,
+                placeholder = "Szukaj parametru (we wszystkich grupach)",
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp)
+            )
+        }
+        if (liveMode) {
+            item {
+                Row(
+                    Modifier.padding(bottom = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(onClick = onTogglePause, modifier = Modifier.weight(1f)) {
+                        Text(if (paused) "Wznów" else "Pauza")
+                    }
+                    Button(
+                        enabled = frames.isNotEmpty(),
+                        onClick = {
+                            val keys = d.params.map { it.keyword }
+                                .filter { k -> (if (chartSel.isEmpty()) true else k in chartSel) && frames.any { it.values.containsKey(k) } }
+                            exportCsv(ctx, pump.serial, frames, keys)
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("Eksport CSV") }
+                }
+            }
+            val charted = d.params.filter { it.keyword in chartSel && frames.any { f -> f.values.containsKey(it.keyword) } }
+            if (frames.isEmpty()) {
+                item {
+                    Text(
+                        "Czekam na dane ze strumienia (pierwsza ramka może przyjść po kilkunastu sekundach)…",
+                        fontSize = 14.sp,
+                        modifier = Modifier.padding(bottom = 12.dp)
+                    )
+                }
+            } else if (charted.isEmpty()) {
+                item {
+                    Text(
+                        "Zaznacz poniżej parametry, które mają się rysować na wykresach.",
+                        fontSize = 14.sp,
+                        modifier = Modifier.padding(bottom = 12.dp)
+                    )
+                }
+            }
+            items(charted, key = { "c_" + it.keyword }) { p -> LiveChart(p, frames) }
+            item {
+                Text("Filtry wykresów", fontWeight = FontWeight.Bold, fontSize = 20.sp, modifier = Modifier.padding(bottom = 8.dp))
+            }
+            val avail = frames.flatMap { it.values.keys }.toSet()
+            val list = d.params
+                .filter { it.keyword in avail && (q.isEmpty() || it.keyword.lowercase().contains(q)) }
+                .sortedWith(compareBy({ it.groupOrder }, { it.order }))
+            items(list, key = { "f_" + it.keyword }) { p ->
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable { onChartSel(p.keyword, p.keyword !in chartSel) },
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Checkbox(checked = p.keyword in chartSel, onCheckedChange = { onChartSel(p.keyword, it) })
+                    Text(p.keyword + if (p.units.isNotBlank()) " (${p.units})" else "", fontSize = 15.sp)
+                }
+            }
+        } else if (q.isEmpty()) {
+            // Zakładki grup jak na portalu (przewijane w bok).
+            item {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(bottom = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    groups.forEach { (name, list) ->
+                        val on = name == active
+                        Surface(
+                            shape = RoundedCornerShape(50),
+                            color = if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                            modifier = Modifier.clickable { selected = name }
+                        ) {
+                            Text(
+                                "$name (${list.size})",
+                                fontSize = 14.sp,
+                                fontWeight = if (on) FontWeight.Bold else FontWeight.Normal,
+                                color = if (on) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                            )
+                        }
+                    }
+                }
+            }
+            item {
+                Text(
+                    (active ?: "").uppercase(),
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 13.sp,
+                    letterSpacing = 0.6.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 4.dp, bottom = 8.dp)
+                )
+            }
+        }
+        if (!liveMode) items(shown, key = { "p_" + it.keyword }) { p ->
+            val editable = editMode && canEdit(p)
+            FieldRow(p, current[p.keyword], d.desired[p.keyword], editable, locked = editMode && p.access == "RW" && !editable) { onEdit(p) }
+        }
+    }
+}
+
+/** Pierwszy z listy kluczy, który ma wartość w stanie pompy (bez rozróżniania wielkości liter). */
+private fun pickKey(current: Map<String, Any?>, vararg keys: String): String? {
+    for (k in keys) {
+        val hit = current.keys.firstOrNull { it.equals(k, ignoreCase = true) && current[it] != null }
+        if (hit != null) return hit
+    }
+    return null
+}
+
+private fun numOf(v: Any?): Double? = (v as? Number)?.toDouble() ?: v?.toString()?.replace(',', '.')?.toDoubleOrNull()
+
+/** Moc w kW: jeśli parametr ma jednostkę W, dzielimy przez 1000. */
+private fun kw(v: Any?, p: Param?): Double? {
+    val n = numOf(v) ?: return null
+    return if (p != null && p.units.trim().equals("W", ignoreCase = true)) n / 1000.0 else n
+}
+
+/** Spłaszcza JSON do par ścieżka -> tekst, pomijając puste wartości. */
+private fun flattenJson(o: Any?, prefix: String, out: MutableList<Pair<String, String>>) {
+    when (o) {
+        null, JSONObject.NULL -> {}
+        is JSONObject -> {
+            val it = o.keys()
+            while (it.hasNext()) {
+                val k = it.next()
+                flattenJson(o.opt(k), if (prefix.isEmpty()) k else "$prefix.$k", out)
+            }
+        }
+        is org.json.JSONArray -> for (i in 0 until o.length()) flattenJson(o.opt(i), "$prefix[$i]", out)
+        else -> {
+            val t = o.toString()
+            if (t.isNotBlank()) out.add(prefix to t)
+        }
+    }
+}
+
+private fun flattenInfo(hp: JSONObject): List<Pair<String, String>> {
+    val out = ArrayList<Pair<String, String>>()
+    flattenJson(hp, "", out)
+    return out
+}
+
+private val PERSONAL_KEY = Regex("owner|user|customer|client|e-?mail|phone|tel|name|address|street|city|postal|zip|country|partner|installer|location|company|registered", RegexOption.IGNORE_CASE)
+
+private fun infoLabel(path: String): String = when (path.substringAfterLast('.').lowercase()) {
+    "owneremail", "email", "useremail" -> "E-mail"
+    "ownername", "username", "fullname" -> "Imię i nazwisko"
+    "firstname", "ownerfirstname" -> "Imię"
+    "lastname", "ownerlastname", "surname" -> "Nazwisko"
+    "phone", "phonenumber", "ownerphone", "mobile" -> "Telefon"
+    "street", "address", "addressline1", "owneraddress" -> "Adres"
+    "city", "town" -> "Miasto"
+    "postalcode", "zipcode", "zip", "postcode" -> "Kod pocztowy"
+    "country" -> "Kraj"
+    "partnername" -> "Partner"
+    "registeredat" -> "Zarejestrowano"
+    "customname" -> "Nazwa własna"
+    "serialno" -> "Numer seryjny"
+    "model" -> "Model"
+    else -> path
+}
+
+/** Okno z danymi właściciela pompy: pola osobowe na górze, reszta odpowiedzi API pod nimi. */
+@Composable
+private fun UserInfoDialog(pump: Pump, d: Detail, onDismiss: () -> Unit) {
+    val base = ArrayList<Pair<String, String>>()
+    base.add("Numer seryjny" to pump.serial)
+    if (pump.model.isNotBlank()) base.add("Model" to pump.model)
+    if (pump.partner.isNotBlank()) base.add("Partner" to pump.partner)
+    if (pump.since.isNotBlank()) base.add("Zarejestrowano" to pump.since)
+    if (pump.email.isNotBlank()) base.add("E-mail" to pump.email)
+    // Pola z API, których nie mamy jeszcze w podstawowych (po etykiecie i wartości).
+    val have = base.map { it.second }.toSet()
+    val api = d.info.filter { it.second !in have }
+    val (personal, rest) = api.partition { PERSONAL_KEY.containsMatchIn(it.first) }
+    @Composable
+    fun rows(list: List<Pair<String, String>>) {
+        list.forEach { (k, v) ->
+            Column(Modifier.padding(bottom = 8.dp)) {
+                SubText(infoLabel(k))
+                Text(v, fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurface)
+            }
+        }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Dane użytkownika") },
+        text = {
+            SelectionContainer {
+                Column(
+                    Modifier
+                        .heightIn(max = 460.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    rows(base)
+                    if (personal.isNotEmpty()) {
+                        Spacer(Modifier.height(4.dp))
+                        rows(personal)
+                    }
+                    if (rest.isNotEmpty()) {
+                        Text(
+                            "POZOSTAŁE DANE POMPY",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp,
+                            letterSpacing = 0.6.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 12.dp, bottom = 8.dp)
+                        )
+                        rows(rest)
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Zamknij") } }
+    )
+}
+
+/** Karta na górze ekranu pompy, wzorowana na karcie „Pompa ciepła” z aplikacji Iglu Home Next. */
+@Composable
+private fun PumpSummaryCard(pump: Pump, d: Detail, current: Map<String, Any?>) {
+    val cs = MaterialTheme.colorScheme
+    fun par(k: String?) = d.params.firstOrNull { it.keyword == k }
+    fun temp(k: String?): String {
+        val v = k?.let { current[it] }
+        val n = numOf(v) ?: return "—"
+        return String.format(Locale.US, "%.1f", n) + " °C"
+    }
+
+    // Temperatura ogólna: IndoorTHW = 1 -> IndoorT. Inaczej, gdy NoIndoorT = 1: BufferT (BufferTank = 1)
+    // albo WaterOutT (BufferTank = 0). Pozostałe (IndoorTHW = 0 i NoIndoorT = 0, temperatura z HMI) -> IndoorT.
+    fun flag(k: String): Boolean? {
+        val v = current.entries.firstOrNull { it.key.equals(k, ignoreCase = true) }?.value ?: return null
+        return v == true || (v is Number && v.toDouble() != 0.0)
+    }
+    val roomKey = when {
+        flag("IndoorTHW") == true -> pickKey(current, "IndoorT")
+        flag("NoIndoorT") == true && flag("BufferTank") == true -> pickKey(current, "BufferT")
+        flag("NoIndoorT") == true -> pickKey(current, "WaterOutT")
+        else -> pickKey(current, "IndoorT")
+    }
+    val waterKey = pickKey(current, "BoilerT", "HeatingSupplyT", "SupplyT", "OutletT", "WaterOutT")
+    val usedKey = pickKey(current, "PowerElectricity")
+    val prodKey = pickKey(current, "PowerHeating")
+    val copKey = pickKey(current, "COP")
+    val used = usedKey?.let { kw(current[it], par(it)) }
+    val prod = prodKey?.let { kw(current[it], par(it)) }
+    val cop = copKey?.let { numOf(current[it]) } ?: if (used != null && prod != null && used > 0.01) prod / used else null
+    // Status wg flag żądań: najpierw pojawia się żądanie (woda/ogrzewanie), potem ruszają pompy obiegowe i sprężarka;
+    // przy wyłączaniu flaga gaśnie pierwsza. Brak żądania = w gotowości (pompa buforowa pracuje cały czas, więc nie jest wskaźnikiem).
+    fun on(k: String): Boolean {
+        val v = current.entries.firstOrNull { it.key.equals(k, ignoreCase = true) }?.value
+        return v == true || (v is Number && v.toDouble() != 0.0)
+    }
+    val hasFlags = listOf("HotWaterRQ", "HeatingRQ", "CoolingRQ", "ActiveCoolingRQ", "HeaterRQ")
+        .any { k -> current.keys.any { it.equals(k, ignoreCase = true) } }
+    val status = when {
+        !pump.online -> "Offline"
+        on("HotWaterRQ") -> "Przygotowanie ciepłej wody"
+        on("HeatingRQ") -> "Ogrzewanie"
+        on("ActiveCoolingRQ") || on("CoolingRQ") -> "Chłodzenie"
+        on("HeaterRQ") -> "Grzałka"
+        hasFlags -> "W gotowości"
+        else -> "Online"
+    }
+    val bad = d.alarm || d.warning
+    var showInfo by remember(pump.serial) { mutableStateOf(false) }
+    if (showInfo) UserInfoDialog(pump, d) { showInfo = false }
+
+    AppCard(
+        Modifier
+            .fillMaxWidth()
+            .padding(top = 12.dp, bottom = 8.dp)
+    ) {
+        Row(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier
+                    .size(48.dp)
+                    .clip(CircleShape)
+                    .background(cs.primary.copy(alpha = 0.12f)),
+                contentAlignment = Alignment.Center
+            ) { Icon(Icons.Outlined.Thermostat, null, tint = cs.primary, modifier = Modifier.size(26.dp)) }
+            Spacer(Modifier.width(14.dp))
+            Text(
+                buildAnnotatedString {
+                    withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append("POMPA CIEPŁA ") }
+                    append(d.title)
+                },
+                fontSize = 19.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                color = cs.onSurface,
+                modifier = Modifier.weight(1f)
+            )
+            Spacer(Modifier.width(8.dp))
+            Box(
+                Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .clickable { showInfo = true }
+                    .background(if (bad) cs.error.copy(alpha = 0.15f) else cs.surfaceVariant),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.Outlined.ErrorOutline, null, tint = if (bad) cs.error else cs.onSurfaceVariant, modifier = Modifier.size(24.dp))
+            }
+        }
+        Box(Modifier.fillMaxWidth().height(1.dp).background(cs.outlineVariant))
+        Row(Modifier.height(IntrinsicSize.Min)) {
+            Column(Modifier.weight(1f).padding(horizontal = 18.dp, vertical = 18.dp)) {
+                Icon(Icons.Outlined.Home, null, tint = cs.primary, modifier = Modifier.size(38.dp))
+                Spacer(Modifier.height(14.dp))
+                Text(temp(roomKey), fontSize = 32.sp, fontWeight = FontWeight.Medium, color = cs.onSurface)
+                val roomLabel = when (roomKey) {
+                    "BufferT" -> "Bufor"
+                    "WaterOutT" -> "Zasilanie"
+                    "IndoorT" -> "Wewnątrz"
+                    else -> "Temperatura ogólna"
+                }
+                Text(roomLabel, fontSize = 15.sp, color = cs.onSurface)
+                SubText(roomKey ?: "brak odczytu", Modifier.padding(top = 2.dp))
+            }
+            Box(Modifier.fillMaxHeight().width(1.dp).background(cs.outlineVariant))
+            Column(Modifier.weight(1f).padding(horizontal = 18.dp, vertical = 18.dp)) {
+                Icon(Icons.Outlined.WaterDrop, null, tint = cs.primary, modifier = Modifier.size(38.dp))
+                Spacer(Modifier.height(14.dp))
+                Text(temp(waterKey), fontSize = 32.sp, fontWeight = FontWeight.Medium, color = cs.onSurface)
+                Text("Temperatura wody", fontSize = 15.sp, color = cs.onSurface)
+                SubText(waterKey ?: "brak odczytu", Modifier.padding(top = 2.dp))
+            }
+        }
+        Box(Modifier.fillMaxWidth().height(1.dp).background(cs.outlineVariant))
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            @Composable
+            fun stat(label: String, value: String, w: Float) {
+                Column(Modifier.weight(w)) {
+                    Text(label, fontSize = 14.sp, color = cs.onSurface)
+                    Text(value, fontSize = 18.sp, fontWeight = FontWeight.Medium, color = cs.onSurface, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            stat("COP", cop?.let { String.format(Locale.US, "%.2f", it) } ?: "—", 0.8f)
+            stat("Używając", used?.let { String.format(Locale.US, "%.2f kW", it) } ?: "—", 1.15f)
+            stat("Produkując", prod?.let { String.format(Locale.US, "%.2f kW", it) } ?: "—", 1.2f)
+            stat("Status", status, 1.35f)
+        }
+    }
+}
+
+/** Wykres jednego parametru z historii ramek: linia (liczby) albo schodki (stany 0/1). */
+@Composable
+private fun LiveChart(p: Param, frames: List<LiveFrame>) {
+    val pts = frames.mapNotNull { f -> f.values[p.keyword]?.let { f.t to it } }
+    val isBool = p.valueType == "boolean"
+    val lineColor = MaterialTheme.colorScheme.primary
+    val gridColor = MaterialTheme.colorScheme.outline
+    Card(
+        Modifier
+            .fillMaxWidth()
+            .padding(bottom = 12.dp)
+    ) {
+        Column(Modifier.padding(12.dp)) {
+            Text(
+                p.keyword + if (p.units.isNotBlank()) " (${p.units})" else "",
+                fontWeight = FontWeight.Bold,
+                fontSize = 15.sp
+            )
+            val last = pts.lastOrNull()?.second
+            Text(
+                "Teraz: " + if (last == null) "—" else valueText(chartValue(last, p), p),
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (pts.size < 2) {
+                Text("Zbieram punkty…", fontSize = 13.sp, modifier = Modifier.padding(top = 8.dp))
+            } else {
+                val t0 = pts.first().first
+                val t1 = pts.last().first
+                var lo = if (isBool) 0.0 else pts.minOf { it.second }
+                var hi = if (isBool) 1.0 else pts.maxOf { it.second }
+                if (!isBool) {
+                    if (hi - lo < 1e-9) {
+                        lo -= 1.0
+                        hi += 1.0
+                    } else {
+                        val pad = (hi - lo) * 0.1
+                        lo -= pad
+                        hi += pad
+                    }
+                }
+                val loF = lo
+                val hiF = hi
+                Canvas(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(120.dp)
+                        .padding(top = 8.dp)
+                ) {
+                    val w = size.width
+                    val h = size.height
+                    val span = (t1 - t0).coerceAtLeast(1L).toFloat()
+                    fun px(t: Long): Float = (t - t0).toFloat() / span * w
+                    fun py(v: Double): Float = h - ((v - loF) / (hiF - loF)).toFloat() * h
+                    drawLine(gridColor, Offset(0f, h), Offset(w, h), 1f)
+                    drawLine(gridColor, Offset(0f, 0f), Offset(0f, h), 1f)
+                    val path = Path()
+                    pts.forEachIndexed { i, (t, v) ->
+                        val x = px(t)
+                        val y = py(v)
+                        if (i == 0) path.moveTo(x, y)
+                        else {
+                            if (isBool) path.lineTo(x, py(pts[i - 1].second))
+                            path.lineTo(x, y)
+                        }
+                    }
+                    drawPath(path, lineColor, style = Stroke(width = 3f))
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(clockText(t0), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (!isBool) {
+                        Text(
+                            "min ${valueText(chartValue(pts.minOf { it.second }, p), p)} · max ${valueText(chartValue(pts.maxOf { it.second }, p), p)}",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Text(clockText(t1), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+    }
+}
+
+/** Jeden parametr jako wiersz: nazwa z jednostką po lewej, wartość po prawej (z ✎, gdy da się edytować). */
+@Composable
+private fun FieldRow(p: Param, cur: Any?, des: Any?, editable: Boolean, locked: Boolean, onEdit: () -> Unit) {
+    val readOnly = p.access == "R"
+    val cs = MaterialTheme.colorScheme
+    AppCard(
+        Modifier
+            .fillMaxWidth()
+            .padding(bottom = 8.dp)
+            .then(if (editable) Modifier.border(2.dp, cs.primary, RoundedCornerShape(16.dp)) else Modifier),
+        onClick = if (editable) onEdit else null
+    ) {
+        Row(Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    p.keyword + if (p.units.isNotBlank()) " (${p.units})" else "",
+                    fontSize = 14.sp,
+                    color = cs.onSurface
+                )
+                if (readOnly) SubText("tylko odczyt")
+                if (locked) SubText("harmonogram: edycja wyłączona")
+                // Gdy zadana wartość różni się od aktualnej, pokazujemy ją pod spodem.
+                if (des != null && des.toString() != cur?.toString()) {
+                    SubText("zadane: ${valueText(des, p)}")
+                }
+            }
+            Text(
+                valueText(cur, p),
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.End,
+                color = if (readOnly) cs.onSurfaceVariant else cs.onSurface,
+                modifier = Modifier.padding(start = 12.dp).widthIn(max = 170.dp)
+            )
+            if (p.inputType == "Select") {
+                Text(" ▾", fontSize = 16.sp, color = cs.onSurfaceVariant)
+            }
+            if (editable) {
+                Text("  ✎", fontSize = 16.sp, color = cs.primary)
+            }
+        }
+    }
+}
+
+private val FAULT_KEY = Regex("alarm|alm|error|fault|flt|err|warn|wrn|usterk|blad|błąd", RegexOption.IGNORE_CASE)
+private val RESET_KEY = Regex("reset|kasuj|clear|ack", RegexOption.IGNORE_CASE)
+
+/** Opis wartości błędu: lista (każdy element z opisem z listy wartości), liczba/tekst z opisem, a gdy go brak, surowa wartość. */
+private fun faultText(v: Any?, p: Param): String {
+    if (v is org.json.JSONArray) {
+        return (0 until v.length()).joinToString(", ") { i ->
+            val e = v.opt(i)?.toString().orEmpty()
+            p.range[e]?.trim() ?: e
+        }
+    }
+    return valueText(v, p)
+}
+
+/** Czy wartość parametru oznacza aktywny błąd: prawda, liczba różna od zera albo niepusty tekst. */
+private fun faultActive(v: Any?): Boolean = when (v) {
+    null -> false
+    is org.json.JSONArray -> v.length() > 0
+    is Boolean -> v
+    is Number -> v.toDouble() != 0.0
+    else -> v.toString().isNotBlank() && v.toString() != "0" && !v.toString().equals("false", true)
+}
+
+/**
+ * Karta błędu na górze szczegółów pompy, gdy jest alarm albo ostrzeżenie: opis (z parametrów stanu, których nazwa
+ * wskazuje na błąd, z opisem z listy wartości, jeśli jest) i przycisk Resetuj. Przycisk pojawia się tylko, gdy pompa
+ * ma zapisywalny parametr resetu błędów; wysłanie wymaga potwierdzenia.
+ */
+@Composable
+private fun FaultCard(d: Detail, current: Map<String, Any?>, saveMsg: String?, onReset: (Param) -> Unit) {
+    val red = Color(0xFFDC2626)
+    val amber = Color(0xFFF59E0B)
+    val color = if (d.alarm) red else amber
+    // Opis: parametry z grupy alarmów (np. "Active alarms") albo o nazwie wskazującej na błąd, o aktywnej wartości.
+    // Same flagi Alarm/Warning pomijamy, bo to już wiemy z nagłówka karty.
+    val lines = d.params
+        .filter {
+            !RESET_KEY.containsMatchIn(it.keyword) &&
+                !it.keyword.equals("Alarm", true) && !it.keyword.equals("Warning", true) &&
+                (FAULT_KEY.containsMatchIn(it.keyword) || it.group.contains("alarm", true) || it.group.contains("warn", true) ||
+                    Regex("active\\s*(alarm|warn|err)", RegexOption.IGNORE_CASE).containsMatchIn(it.raw)) &&
+                faultActive(current[it.keyword])
+        }
+        .sortedBy { it.order }
+        .map { it.keyword to faultText(current[it.keyword], it) }
+    // Aktywne alarmy i ostrzeżenia: pole "alarms" w ramce strumienia (nazwa + isAlarm), opis z tłumaczeń portalu.
+    val known = d.params.map { it.keyword }.toSet()
+    val extras = current.filter { (k, _) -> k !in known }
+    val activeAlarms = LiveMeta.alarms.map { (n, isAlarm) ->
+        n to ((d.alarmTexts[n] ?: n) + if (isAlarm) " (alarm)" else " (ostrzeżenie)")
+    } + LiveMeta.sbcErrors.map { it to "Błąd modułu komunikacyjnego: $it" }
+    val allLines = lines + activeAlarms
+    // Reset: zapisywalny parametr, którego nazwa albo etykieta to "reset alarms" (w dowolnej kolejności).
+    val resetParam = d.params.firstOrNull {
+        canEdit(it) && Regex("reset\\W*(alarm|alm|err|fault|warn)|(alarm|alm|err|fault|warn)\\w*\\W*reset", RegexOption.IGNORE_CASE).containsMatchIn(it.raw)
+    }
+    var confirm by remember { mutableStateOf(false) }
+    AppCard(Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    if (d.alarm) Icons.Filled.Report else Icons.Filled.Warning,
+                    null, tint = color, modifier = Modifier.size(30.dp)
+                )
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    if (d.alarm) "Alarm pompy" else "Ostrzeżenie pompy",
+                    fontWeight = FontWeight.Bold, fontSize = 17.sp, color = color
+                )
+            }
+            if (allLines.isEmpty()) {
+                SubText("Pompa zgłasza " + (if (d.alarm) "alarm" else "ostrzeżenie") + ", ale w stanie nie ma opisu błędu.")
+            } else {
+                allLines.forEach { (k, v) ->
+                    Column {
+                        Text(v, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
+                        SubText(if (current[k] != null) k + " = " + current[k].toString() else k)
+                    }
+                }
+            }
+            if (resetParam != null) {
+                Button(onClick = { confirm = true }) { Text("Resetuj") }
+            }
+            if (saveMsg != null) Text(saveMsg, fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+        }
+    }
+    if (confirm && resetParam != null) {
+        AlertDialog(
+            onDismissRequest = { confirm = false },
+            title = { Text("Zresetować błąd?") },
+            text = { Text("Do pompy ${d.title} zostanie wysłany reset błędu (${resetParam.keyword}).") },
+            confirmButton = { TextButton(onClick = { confirm = false; onReset(resetParam) }) { Text("Resetuj") } },
+            dismissButton = { TextButton(onClick = { confirm = false }) { Text("Anuluj") } }
+        )
+    }
+}
+
+/** Mała pigułka informacyjna (alarmy/ostrzeżenia): czerwona, gdy coś się dzieje. */
+@Composable
+private fun InfoChip(text: String, bad: Boolean) {
+    val cs = MaterialTheme.colorScheme
+    Surface(shape = RoundedCornerShape(50), color = if (bad) cs.error.copy(alpha = 0.15f) else cs.surfaceVariant) {
+        Text(
+            text,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = if (bad) cs.error else cs.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+        )
+    }
+}
+
+/** Grupy parametrów serwisowych/instalacyjnych: przy ich zmianie pokazujemy mocniejsze ostrzeżenie. */
+private val SENSITIVE_GROUPS = setOf("Manufacture", "Installation", "Service")
+
+/** Harmonogram tygodniowy (ScheduleS1Period1, ScheduleS1Period1Mode, ScheduleS1Weekdays, ScheduleTemperatures...). */
+private fun isSchedule(p: Param): Boolean = p.keyword.startsWith("Schedule")
+
+/**
+ * Czy parametr można zmieniać z aplikacji: tak, gdy API podaje go jako RW (limity z ParamLimits sprawdzamy w oknie edycji).
+ * Wyjątek: parametry harmonogramu, bo ich kodowanie jest nieznane i nie są u nas używane.
+ */
+private fun canEdit(p: Param): Boolean = p.access == "RW" && !isSchedule(p)
+
+private fun sameValue(a: Any?, b: Any?): Boolean {
+    if (a == null || b == null) return a == b
+    if (a is Number && b is Number) return a.toDouble() == b.toDouble()
+    return a.toString() == b.toString()
+}
+
+/** Liczba do wysłania: całkowita jako Long (np. 61), inaczej Double (np. 23.5). */
+private fun numberOut(d: Double): Any = if (d == Math.floor(d) && Math.abs(d) < 1e12) d.toLong() else d
+
+/**
+ * Okno zmiany jednego parametru: pole liczbowe albo lista opcji (Tak/Nie i listy z portalu).
+ * Pokazuje starą i nową wartość, wysyła dopiero po dotknięciu przycisku.
+ */
+@Composable
+private fun EditDialog(p: Param, current: Any?, onDismiss: () -> Unit, onSave: (Any) -> Unit) {
+    val isBool = p.valueType == "boolean"
+    val options: List<Pair<String, String>> = when {
+        p.range.isNotEmpty() -> p.range.entries.map { it.key to it.value.trim() }
+        isBool -> listOf("true" to "Tak", "false" to "Nie")
+        else -> emptyList()
+    }
+    var text by remember { mutableStateOf(current?.toString().orEmpty()) }
+    var choice by remember { mutableStateOf(current?.toString()) }
+
+    val limit = ParamLimits.MIN_MAX[p.keyword]
+    val parsed = text.trim().replace(',', '.').toDoubleOrNull()?.takeIf { it.isFinite() }
+    // Bez wpisu w ParamLimits aplikacja nie sprawdza zakresu (pilnuje go tylko serwer Iglutech).
+    val inRange = parsed != null && (limit == null || (parsed >= limit.first && parsed <= limit.second))
+    val stepOk = parsed != null && (p.scale <= 0.0 ||
+        Math.abs(parsed / p.scale - Math.round(parsed / p.scale).toDouble()) < 1e-6)
+    val newValue: Any? = if (options.isNotEmpty()) {
+        choice?.let { c -> if (isBool) c.toBooleanStrictOrNull() else (c.toDoubleOrNull()?.let { numberOut(it) } ?: c) }
+    } else {
+        if (parsed != null && inRange && stepOk) numberOut(parsed) else null
+    }
+    val changed = newValue != null && !sameValue(newValue, current)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(p.keyword + if (p.units.isNotBlank()) " (${p.units})" else "") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Aktualnie: ${valueText(current, p)}", fontSize = 14.sp)
+                if (options.isNotEmpty()) {
+                    options.forEach { (v, label) ->
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clickable { choice = v },
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(selected = choice == v, onClick = { choice = v })
+                            Text(label, fontSize = 15.sp)
+                        }
+                    }
+                } else {
+                    OutlinedTextField(
+                        value = text,
+                        onValueChange = { text = it },
+                        label = { Text("Nowa wartość" + if (p.units.isNotBlank()) " (${p.units})" else "") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (limit != null) {
+                        Text(
+                            "Zakres: ${limit.first} – ${limit.second}" +
+                                (if (p.units.isNotBlank()) " ${p.units}" else "") +
+                                (if (p.scale > 0.0 && p.scale < 1.0) ", krok ${p.scale}" else ""),
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    if (limit == null) {
+                        Text(
+                            "Brak limitu w pliku rejestrów: aplikacja nie sprawdza zakresu tej wartości.",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                    if (parsed != null && limit != null && !inRange) {
+                        Text("Wartość poza zakresem, nie zostanie wysłana.", fontSize = 13.sp, color = MaterialTheme.colorScheme.error)
+                    } else if (parsed != null && !stepOk) {
+                        Text("Wartość niezgodna z krokiem ${p.scale}.", fontSize = 13.sp, color = MaterialTheme.colorScheme.error)
+                    }
+                }
+                if (changed && newValue != null) {
+                    Text("Nowa: ${valueText(newValue, p)}", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                }
+                if (p.keyword in ParamLimits.READ_ONLY) {
+                    Text(
+                        "Plik rejestrów oznacza ten parametr jako tylko do odczytu, choć API pozwala go zmienić.",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+                if (p.group in SENSITIVE_GROUPS) {
+                    Text(
+                        "To parametr serwisowy/instalacyjny. Zmiana może wpłynąć na pracę pompy.",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = changed, onClick = { newValue?.let { onSave(it) } }) { Text("Wyślij do pompy") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Anuluj") } }
+    )
+}

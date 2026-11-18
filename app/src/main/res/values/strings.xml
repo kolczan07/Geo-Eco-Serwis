@@ -1,0 +1,6 @@
+<resources>
+    <string name="app_name">Geo-Eco-Serwis</string>
+    <string name="widget_weather_desc">Pogoda: temperatura teraz i prognoza na dziś</string>
+    <string name="widget_mail_desc">Poczta: liczba nieprzeczytanych wiadomości</string>
+    <string name="widget_pumps_desc">Pompy ciepła: online, offline i alarmy</string>
+</resources>
