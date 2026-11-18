@@ -57,6 +57,12 @@ android {
         compose = true
         buildConfig = true
     }
+    // JavaMail i activation niosą te same pliki licencji — bierzemy pierwszy z brzegu.
+    packaging {
+        resources {
+            pickFirsts += listOf("META-INF/NOTICE.md", "META-INF/LICENSE.md", "META-INF/NOTICE", "META-INF/LICENSE", "META-INF/DEPENDENCIES")
+        }
+    }
     // composeOptions USUNIĘTE — od Kotlina 2.0 plugin sam dobiera wersję kompilatora
 
     applicationVariants.all {
