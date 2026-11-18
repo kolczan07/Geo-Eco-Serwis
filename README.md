@@ -6,11 +6,4 @@ Natywna aplikacja na Androida (Kotlin, Jetpack Compose).
 - **Iglutech Service** – lista pomp ciepła, szczegóły, alarmy, widżet.
 - **Radio internetowe**, **Pogoda**, skróty do aplikacji, widżety.
 
-Wersja bez narzędzi sieciowych, Asaja, synchronizacji z Google Drive i wyboru użytkownika.
-
-## Budowanie
-
-GitHub Actions (`.github/workflows`): push na `main` buduje wersję debug i publikuje ją jako wydanie `debug`; tag `v*` buduje podpisany release.
-
-Wymagane sekrety repozytorium: `KEYSTORE_B64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`.
-Aktualizacje w aplikacji pobiera z wydań tego repozytorium (`kolczan07/Geo-Eco-Serwis`).
+Wymagane sekrety repozytorium: `KEYSTORE_B64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD'
