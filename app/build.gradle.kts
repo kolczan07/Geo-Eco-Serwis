@@ -39,7 +39,7 @@ android {
         debug {
             // Ten sam podpis co release => debug aktualizuje zainstalowaną aplikację (dane zostają).
             // Bez keystore (np. lokalnie) zostaje zwykły podpis debug.
-            if (ksFile.exists()) signingConfig = signingConfigs.getByName("release")
+            if (ksFile.exists() && ksFile.length() > 0 && !System.getenv("KEYSTORE_PASSWORD").isNullOrEmpty()) signingConfig = signingConfigs.getByName("release")
         }
         release {
             isMinifyEnabled = false
