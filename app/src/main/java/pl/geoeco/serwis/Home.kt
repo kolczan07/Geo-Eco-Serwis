@@ -62,6 +62,10 @@ private val tools = listOf(
     Tile("⛅", "Pogoda", "Prognoza 7-dniowa i godzinowa", Screen.Weather)
 )
 
+private val docs = listOf(
+    Tile("📝", "Zlecenie montażowe PC", "Formularz zlecenia dla pompy ciepła, eksport PDF", Screen.Zlecenie)
+)
+
 @Composable
 fun HomeScreen(onOpen: (Screen) -> Unit, onOpenPumps: () -> Unit = {}) {
     val cs = MaterialTheme.colorScheme
@@ -119,6 +123,10 @@ fun HomeScreen(onOpen: (Screen) -> Unit, onOpenPumps: () -> Unit = {}) {
             SectionTitle("Aplikacje")
             AppsGrid(apps)
         }
+
+        Spacer(Modifier.height(12.dp))
+        SectionTitle("Dokumenty")
+        TileGrid(docs, onOpen, onOpenPumps)
 
         Spacer(Modifier.height(24.dp))
     }

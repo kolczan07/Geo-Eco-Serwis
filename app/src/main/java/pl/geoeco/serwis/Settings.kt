@@ -148,7 +148,7 @@ fun AboutScreen(onBack: () -> Unit) {
                 color = MaterialTheme.colorScheme.onBackground
             )
             Text(
-                "Poczta (IMAP/SMTP), lista i podgląd pomp ciepła Iglutech, radio internetowe i pogoda.",
+                "Poczta (IMAP/SMTP), zlecenie montażowe PC (PDF), lista i podgląd pomp ciepła Iglutech, radio internetowe i pogoda.",
                 modifier = Modifier.padding(top = 8.dp),
                 color = MaterialTheme.colorScheme.onBackground
             )

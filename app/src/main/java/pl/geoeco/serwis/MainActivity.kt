@@ -186,6 +186,7 @@ fun App(openMail: Boolean, onMailOpened: () -> Unit, openTarget: String?, onTarg
                 Screen.Mail -> MailScreen(onBack = { back() }, onOpenAccount = { go(Screen.MailAccount) })
                 Screen.MailSettings -> MailSettingsScreen(onBack = { back() })
                 Screen.MailAccount -> MailAccountScreen(onBack = { back() })
+                Screen.Zlecenie -> ZlecenieScreen(onBack = { back() })
                 Screen.Weather -> WeatherScreen(onBack = { back() })
                 Screen.Iglutech -> IglutechScreen(onBack = { back() }, openSerial = pendingSerial)
                 Screen.Shortcuts -> ShortcutsScreen(onBack = { back() })
