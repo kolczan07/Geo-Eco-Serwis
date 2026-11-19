@@ -349,6 +349,14 @@ fun MailScreen(onBack: () -> Unit, onOpenAccount: () -> Unit = {}) {
             try {
                 val label = folder
                 val q = searchQuery()
+                if (!more && rows.isEmpty() && query.isBlank() && !(onlyUnread && label == "INBOX")) {
+                    // Pokazujemy od razu ostatnio pobraną listę tego folderu, a świeżą dociągamy w tle.
+                    val cache = ImapApi.cachedList(ctx, label)
+                    if (cache != null) {
+                        rows.addAll(cache.first)
+                        nextToken = cache.second
+                    }
+                }
                 val unreadOnly = onlyUnread && label == "INBOX"
                 val (fetched, next) = api { ImapApi.list(ctx, label, if (more) nextToken else null, query.trim(), unreadOnly) }
                 if (label == folder && q == searchQuery()) {
@@ -362,7 +370,7 @@ fun MailScreen(onBack: () -> Unit, onOpenAccount: () -> Unit = {}) {
                         scope.launch(Dispatchers.IO) { try { ImapApi.prefetch(ctx, top) } catch (e: Exception) { } }
                     }
                 }
-                if (label == "INBOX") updateUnread()
+                if (label == "INBOX") scope.launch { updateUnread() }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
