@@ -106,8 +106,18 @@ fun MailAccountScreen(onBack: () -> Unit) {
             busy = true
             status = "Sprawdzam połączenie…"
             try {
-                withContext(Dispatchers.IO) { ImapApi.verify(ctx) }
-                status = "Połączono ✓ Konto zapisane."
+                val fix = withContext(Dispatchers.IO) { ImapApi.verify(ctx) }
+                if (fix != null) {
+                    // Wpisany port SMTP nie odpowiadał, a inny działa — zapamiętujemy działający.
+                    Prefs.saveMailAccount(
+                        ctx, mail, fromName, login.ifBlank { mail }, password,
+                        imapHost, ip, if (imapSsl) "ssl" else "starttls",
+                        smtpHost, fix.first, fix.second, saveSent
+                    )
+                    smtpPort = fix.first.toString()
+                    smtpSsl = fix.second == "ssl"
+                    status = "Połączono ✓ Konto zapisane. Wysyłanie działa na porcie ${fix.first} (${if (smtpSsl) "SSL" else "STARTTLS"}) — ustawiłem je."
+                } else status = "Połączono ✓ Konto zapisane."
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

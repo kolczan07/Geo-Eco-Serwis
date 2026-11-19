@@ -173,8 +173,24 @@ object ImapApi {
         }
     }
 
-    /** Sprawdza logowanie do IMAP i SMTP z zapisanymi ustawieniami. Rzuca IOException z czytelnym opisem. */
-    fun verify(ctx: Context) {
+    private fun trySmtp(ctx: Context, port: Int, sec: String) {
+        val proto = protoSmtp(sec)
+        val props = baseProps(proto, sec)
+        props["mail.$proto.auth"] = "true"
+        val tr = Session.getInstance(props).getTransport(proto)
+        try {
+            tr.connect(Prefs.mailSmtpHost(ctx), port, Prefs.mailLogin(ctx), Prefs.mailPassword(ctx))
+        } finally {
+            try { tr.close() } catch (e: Exception) { }
+        }
+    }
+
+    /**
+     * Sprawdza IMAP (błąd = wyjątek), potem SMTP. Gdy SMTP na wpisanym porcie nie odpowiada, próbuje typowych
+     * alternatyw (465 SSL / 587 STARTTLS). Zwraca działającą parę (port, zabezpieczenie) albo null, jeśli wpisana działa.
+     * Gdy nie działa żadna, rzuca wyjątek z informacją, że odbieranie jest w porządku.
+     */
+    fun verify(ctx: Context): Pair<Int, String>? {
         guard {
             val store = openStore(ctx)
             try {
@@ -185,18 +201,23 @@ object ImapApi {
                 try { store.close() } catch (e: Exception) { }
             }
         }
-        guard {
-            val sec = Prefs.mailSmtpSec(ctx)
-            val proto = protoSmtp(sec)
-            val props = baseProps(proto, sec)
-            props["mail.$proto.auth"] = "true"
-            val tr = Session.getInstance(props).getTransport(proto)
-            try {
-                tr.connect(Prefs.mailSmtpHost(ctx), Prefs.mailSmtpPort(ctx), Prefs.mailLogin(ctx), Prefs.mailPassword(ctx))
-            } finally {
-                try { tr.close() } catch (e: Exception) { }
-            }
+        val port0 = Prefs.mailSmtpPort(ctx)
+        val sec0 = Prefs.mailSmtpSec(ctx)
+        var first: Exception? = null
+        try {
+            guard { trySmtp(ctx, port0, sec0) }
+            return null
+        } catch (e: Exception) {
+            first = e
         }
+        for ((port, sec) in listOf(587 to "starttls", 465 to "ssl")) {
+            if (port == port0 && sec == sec0) continue
+            try {
+                guard { trySmtp(ctx, port, sec) }
+                return port to sec
+            } catch (e: Exception) { }
+        }
+        throw java.io.IOException("Odbieranie poczty działa, ale wysyłanie nie (SMTP " + Prefs.mailSmtpHost(ctx) + ":" + port0 + "): " + (first?.message ?: ""))
     }
 
     // ───────────────────────── foldery ─────────────────────────
