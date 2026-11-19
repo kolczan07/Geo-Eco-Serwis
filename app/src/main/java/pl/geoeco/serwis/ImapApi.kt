@@ -305,15 +305,22 @@ object ImapApi {
             val uid = key.substring(1).toLongOrNull() ?: return emptyList()
             return listOfNotNull(f.getMessageByUID(uid))
         }
-        val candidates: Array<Message> = try {
-            f.search(SubjectTerm(key))
-        } catch (e: Exception) {
-            // Serwer nie obsługuje wyszukiwania ze znakami spoza ASCII — przeglądamy ostatnie wiadomości sami.
+        fun scan(): List<Message> {
             val n = f.messageCount
-            if (n < 1) emptyArray() else f.getMessages(maxOf(1, n - 400 + 1), n)
+            if (n < 1) return emptyList()
+            val arr = f.getMessages(maxOf(1, n - 500 + 1), n)
+            fetchEnvelopes(f, arr)
+            return arr.filter { normSubject(subjectOf(it)) == key }
         }
-        fetchEnvelopes(f, candidates)
-        return candidates.filter { normSubject(subjectOf(it)) == key }
+        val viaSearch: List<Message> = try {
+            val found = f.search(SubjectTerm(key))
+            fetchEnvelopes(f, found)
+            found.filter { normSubject(subjectOf(it)) == key }
+        } catch (e: Exception) {
+            emptyList()
+        }
+        // Wyszukiwanie po stronie serwera bywa zawodne (znaki specjalne, Gmail) — wtedy przeglądamy ostatnie wiadomości sami.
+        return viaSearch.ifEmpty { scan() }
     }
 
     private fun rolesFor(role: String): List<String> = when (role) {
@@ -416,7 +423,8 @@ object ImapApi {
         val key = id.substringAfter('|')
         val collected = ArrayList<Pair<Long, MailMessage>>()
         var subject = ""
-        for (r in rolesFor(role)) {
+        // Klucz „#UID” dotyczy jednego folderu — UID-y z innych folderów to inne wiadomości.
+        for (r in if (key.startsWith("#")) listOf(role) else rolesFor(role)) {
             val f = try { openFolder(ctx, store, r, false) } catch (e: Exception) { continue }
             try {
                 val msgs = findInFolder(f, key)
@@ -432,6 +440,7 @@ object ImapApi {
                 try { f.close(false) } catch (e: Exception) { }
             }
         }
+        if (collected.isEmpty()) throw IOException("Nie znaleziono wiadomości tego wątku na serwerze (może została przeniesiona lub usunięta).")
         val list = collected.sortedBy { it.first }.map { it.second }
         MailThread(id, subject.ifBlank { "(bez tematu)" }, list)
     }
