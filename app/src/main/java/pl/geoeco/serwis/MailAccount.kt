@@ -18,6 +18,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -56,6 +57,25 @@ fun MailAccountScreen(onBack: () -> Unit) {
     var status by remember { mutableStateOf(if (Prefs.mailConfigured(ctx)) "Konto zapisane. Wpisz hasło ponownie tylko jeśli chcesz je zmienić." else "") }
     var busy by remember { mutableStateOf(false) }
     var confirmClear by remember { mutableStateOf(false) }
+
+    /** Czy użytkownik sam ruszał pola serwerów — wtedy autokonfiguracja ich nie nadpisuje. */
+    var hostsEdited by remember { mutableStateOf(Prefs.mailConfigured(ctx)) }
+    var providerNote by remember { mutableStateOf("") }
+
+    // Autokonfiguracja: po wpisaniu adresu rozpoznajemy dostawcę (domena, a dla własnych domen rekord MX).
+    LaunchedEffect(email) {
+        if (hostsEdited || !email.contains("@")) return@LaunchedEffect
+        kotlinx.coroutines.delay(700)
+        val p = MailAutoConfig.detect(email)
+        if (p == null) {
+            providerNote = ""
+            return@LaunchedEffect
+        }
+        imapHost = p.imapHost; imapPort = p.imapPort.toString(); imapSsl = p.imapSsl
+        smtpHost = p.smtpHost; smtpPort = p.smtpPort.toString(); smtpSsl = p.smtpSsl
+        if (p.savesSentItself) saveSent = false
+        providerNote = "Wykryto dostawcę: ${p.name}. Serwery uzupełnione automatycznie." + (if (p.note.isNotBlank()) "\n" + p.note else "")
+    }
 
     /** Podpowiada serwery z domeny adresu, jeśli pola są jeszcze puste. */
     fun guessHosts() {
@@ -104,17 +124,18 @@ fun MailAccountScreen(onBack: () -> Unit) {
                 .verticalScroll(rememberScrollState()).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            SubText("Dane znajdziesz w ustawieniach skrzynki u dostawcy poczty (IMAP/SMTP). Hasło jest szyfrowane w pamięci telefonu. Dla Gmaila i niektórych innych serwisów potrzebne jest hasło aplikacji, a nie zwykłe hasło konta.")
+            SubText("Wpisz adres e-mail — serwery uzupełnią się same dla Google (także firmowych domen na Workspace) i home.pl; dla innych dostawców wpisz je ręcznie. Hasło jest szyfrowane w pamięci telefonu. Dla Gmaila i niektórych innych serwisów potrzebne jest hasło aplikacji, a nie zwykłe hasło konta.")
 
             LabeledField("Adres e-mail:", email, { email = it }, keyboard = KeyboardType.Email)
+            if (providerNote.isNotEmpty()) SubText(providerNote)
             LabeledField("Nazwa nadawcy (opcjonalnie):", fromName, { fromName = it })
             LabeledField("Login (jeśli inny niż adres e-mail):", login, { login = it })
             LabeledField("Hasło:", pass, { pass = it }, password = true)
 
             SectionTitle("Odbieranie (IMAP)")
-            LabeledField("Serwer IMAP:", imapHost, { imapHost = it }, keyboard = KeyboardType.Uri)
+            LabeledField("Serwer IMAP:", imapHost, { imapHost = it; hostsEdited = true }, keyboard = KeyboardType.Uri)
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                LabeledField("Port:", imapPort, { imapPort = it }, Modifier.weight(1f), keyboard = KeyboardType.Number)
+                LabeledField("Port:", imapPort, { imapPort = it; hostsEdited = true }, Modifier.weight(1f), keyboard = KeyboardType.Number)
                 Column(Modifier.weight(2f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Switch(checked = imapSsl, onCheckedChange = { on ->
@@ -128,9 +149,9 @@ fun MailAccountScreen(onBack: () -> Unit) {
             }
 
             SectionTitle("Wysyłanie (SMTP)")
-            LabeledField("Serwer SMTP:", smtpHost, { smtpHost = it }, keyboard = KeyboardType.Uri)
+            LabeledField("Serwer SMTP:", smtpHost, { smtpHost = it; hostsEdited = true }, keyboard = KeyboardType.Uri)
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                LabeledField("Port:", smtpPort, { smtpPort = it }, Modifier.weight(1f), keyboard = KeyboardType.Number)
+                LabeledField("Port:", smtpPort, { smtpPort = it; hostsEdited = true }, Modifier.weight(1f), keyboard = KeyboardType.Number)
                 Column(Modifier.weight(2f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Switch(checked = smtpSsl, onCheckedChange = { on ->
