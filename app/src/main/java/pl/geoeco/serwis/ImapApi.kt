@@ -47,6 +47,9 @@ import javax.mail.search.SubjectTerm
 object ImapApi {
     private const val WINDOW = 60
 
+    /** Wątek → UID-y jego wiadomości w folderze listy (zapamiętane przy listowaniu), żeby otwarcie nie szukało od nowa. */
+    private val knownUids = java.util.concurrent.ConcurrentHashMap<String, List<Long>>()
+
     init {
         // JavaMail na Androidzie potrzebuje jawnej rejestracji obsługi typów MIME.
         try {
@@ -73,6 +76,10 @@ object ImapApi {
         p["mail.$proto.connectiontimeout"] = "15000"
         p["mail.$proto.timeout"] = "45000"
         p["mail.$proto.writetimeout"] = "45000"
+        // Treść wiadomości jednym żądaniem zamiast porcjami po 16 KB (każda porcja to osobna wymiana z serwerem).
+        p["mail.$proto.partialfetch"] = "false"
+        // Połączenie w puli trzymamy dłużej niż domyślne 45 s, żeby kolejne otwarcia nie logowały się od nowa.
+        p["mail.$proto.connectionpooltimeout"] = "300000"
         p["mail.$proto.ssl.checkserveridentity"] = "true"
         if (sec == "starttls") {
             p["mail.$proto.starttls.enable"] = "true"
@@ -125,12 +132,43 @@ object ImapApi {
         return store
     }
 
+    // Jedno połączenie IMAP współdzielone przez kolejne operacje: logowanie przez TLS przy każdym otwarciu maila
+    // to kilka sekund na telefonie. Połączenie odnawiamy, gdy konto się zmieni albo serwer je zerwał.
+    private val storeLock = Any()
+    private var cachedStore: Store? = null
+    private var cachedKey = ""
+
+    private fun acquireStore(ctx: Context): Store = synchronized(storeLock) {
+        val key = Prefs.mailImapHost(ctx) + "|" + Prefs.mailLogin(ctx) + "|" + Prefs.mailPassword(ctx).hashCode()
+        val cur = cachedStore
+        if (cur != null && cachedKey == key && cur.isConnected) return cur
+        try { cur?.close() } catch (e: Exception) { }
+        cachedStore = null
+        val st = openStore(ctx)
+        cachedStore = st
+        cachedKey = key
+        st
+    }
+
+    private fun dropStore() = synchronized(storeLock) {
+        try { cachedStore?.close() } catch (e: Exception) { }
+        cachedStore = null
+        cachedKey = ""
+    }
+
     private fun <T> withStore(ctx: Context, block: (Store) -> T): T = guard {
-        val store = openStore(ctx)
         try {
-            block(store)
-        } finally {
-            try { store.close() } catch (e: Exception) { }
+            block(acquireStore(ctx))
+        } catch (e: Exception) {
+            // Połączenie mogło wygasnąć po stronie serwera — jedna próba na świeżym.
+            if (e is javax.mail.StoreClosedException || e is javax.mail.FolderClosedException ||
+                e is java.net.SocketException || e.cause is java.net.SocketException || e.cause is java.io.EOFException
+            ) {
+                dropStore()
+                block(acquireStore(ctx))
+            } else {
+                throw e
+            }
         }
     }
 
@@ -302,6 +340,7 @@ object ImapApi {
                     // list jest od najnowszej do najstarszej
                     val last = list.first()
                     val first = list.last()
+                    try { knownUids["$role|$key"] = list.map { uidOf(f, it) } } catch (e: Exception) { }
                     MailRow(
                         id = "$role|$key",
                         who = senderName(if (outgoing) toOf(last) else fromOf(last)),
@@ -457,7 +496,22 @@ object ImapApi {
         for (r in if (key.startsWith("#")) listOf(role) else rolesFor(role)) {
             val f = try { openFolder(ctx, store, r, false) } catch (e: Exception) { continue }
             try {
-                val msgs = findInFolder(f, key, primary = r == role)
+                val known: List<Message> = if (r == role) {
+                    try {
+                        knownUids[id]?.let { u -> f.getMessagesByUID(u.toLongArray()).filterNotNull() }.orEmpty()
+                    } catch (e: Exception) { emptyList() }
+                } else emptyList()
+                val msgs = when {
+                    // Znamy już wiadomości wątku z listy: jedno pobranie po UID, bez wyszukiwania.
+                    known.isNotEmpty() && !key.all { it.code < 128 } -> known
+                    known.isNotEmpty() -> {
+                        // Dla tematów ASCII jedno szybkie wyszukiwanie na serwerze dorzuca starsze wiadomości spoza okna listy.
+                        fetchLight(f, known.toTypedArray())
+                        val extra = findInFolder(f, key, primary = false)
+                        (known + extra).distinctBy { uidOf(f, it) }
+                    }
+                    else -> findInFolder(f, key, primary = r == role)
+                }
                 if (msgs.isEmpty()) continue
                 val arr = msgs.toTypedArray()
                 fetchEnvelopes(f, arr)
